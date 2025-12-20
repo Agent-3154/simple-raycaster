@@ -80,6 +80,8 @@ def main():
     mesh_filters = [[f"shape_{i}_{j}", "shared_shape"] for j in range(M) for i in range(N)]
     mesh_indices = raycaster_independent.get_mesh_ids(mesh_filters)
     
+    import copy
+    random_shapes = copy.deepcopy(random_shapes)
     for shape, translation in zip(random_shapes, translations):
         shape.apply_translation(translation)
 
@@ -110,7 +112,7 @@ def main():
     quaternions = torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda")
     quaternions = quaternions.expand(N * M + 1, 4).clone() # [N * M + 1, 4]
     
-    ray_starts = translations[:, None, :].expand(N * M, N_rays, 3).clone()
+    ray_starts = translations[:, None, :].expand(-1, N_rays, -1).clone()
     ray_starts[:, :, :2] += torch.randn_like(ray_starts[:, :, :2]) * 0.05
     ray_starts[:, :, 2].uniform_(1.0, 2.0)
 
@@ -124,7 +126,7 @@ def main():
     for _ in range(10):
         # Fused versions
         _ = raycaster_independent.raycast_fused(
-            mesh_pos_w=translations,
+            mesh_pos_w=translations_meshes,
             mesh_quat_w=quaternions,
             ray_starts_w=ray_starts.clone(),
             ray_dirs_w=ray_dirs.clone(),
@@ -133,8 +135,8 @@ def main():
             max_dist=10.0,
         )
         _ = raycaster_combined.raycast_fused(
-            mesh_pos_w=torch.tensor([0., 0., 0.], device="cuda").expand(N * M, 1, 3),
-            mesh_quat_w=torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda").expand(N * M, 1, 4),
+            mesh_pos_w=torch.tensor([0., 0., 0.], device="cuda").expand(N * M + 1, 3),
+            mesh_quat_w=torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda").expand(N * M + 1, 4),
             ray_starts_w=ray_starts.clone(),
             ray_dirs_w=ray_dirs.clone(),
             min_dist=0.05,
@@ -210,7 +212,7 @@ def main():
     # Benchmark all 4 combinations
     time_1_fused, mem_before_1_fused, mem_after_1_fused, mem_peak_1_fused, mem_used_1_fused, pos_1_fused, dist_1_fused = benchmark_raycast(
         raycaster_independent, "raycast_fused",
-        translations,
+        translations_meshes,
         quaternions,
         ray_starts, ray_dirs,
         mesh_indices=mesh_indices,
@@ -228,11 +230,15 @@ def main():
     
     time_2_fused, mem_before_2_fused, mem_after_2_fused, mem_peak_2_fused, mem_used_2_fused, pos_2_fused, dist_2_fused = benchmark_raycast(
         raycaster_combined, "raycast_fused",
-        torch.tensor([0., 0., 0.], device="cuda").expand(N * M, 1, 3),
-        torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda").expand(N * M, 1, 4),
+        torch.tensor([0., 0., 0.], device="cuda").expand(N * M + 1, 3),
+        torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda").expand(N * M + 1, 4),
         ray_starts, ray_dirs,
         description="Option 2 (combined mesh) - FUSED"
     )
+    
+    breakpoint()
+    # pos_2_fused = pos_1_fused
+    # pos_1_fused = pos_2_fused
     
     # time_2_nonfused, mem_before_2_nonfused, mem_after_2_nonfused, mem_peak_2_nonfused, mem_used_2_nonfused, pos_2_nonfused, dist_2_nonfused = benchmark_raycast(
     #     raycaster_combined, "raycast",
