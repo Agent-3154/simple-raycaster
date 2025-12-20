@@ -78,7 +78,7 @@ def main():
         device="cuda",
     )
     mesh_filters = [[f"shape_{i}_{j}", "shared_shape"] for j in range(M) for i in range(N)]
-    mesh_indices = raycaster_independent.get_mesh_ids(mesh_filters)
+    n_mesh_per_cam, mesh_ids, cam_ids = raycaster_independent.get_mesh_ids(mesh_filters, device="cuda")
     
     import copy
     random_shapes = copy.deepcopy(random_shapes)
@@ -130,7 +130,9 @@ def main():
             mesh_quat_w=quaternions,
             ray_starts_w=ray_starts.clone(),
             ray_dirs_w=ray_dirs.clone(),
-            mesh_indices=mesh_indices,
+            n_mesh_per_cam=n_mesh_per_cam,
+            mesh_ids_flattened=mesh_ids,
+            cam_ids_flattened=cam_ids,
             min_dist=0.05,
             max_dist=10.0,
         )

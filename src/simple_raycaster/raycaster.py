@@ -8,6 +8,7 @@ import jaxtyping as at
 
 from .helpers import quat_rotate_inverse, trimesh2wp
 
+
 @wp.kernel(enable_backward=False)
 def raycast_kernel(
     meshes: wp.array(dtype=wp.uint64),
@@ -53,7 +54,7 @@ def transform_and_raycast_kernel(
     i, ray_id = wp.tid()
     cam_id = cam_ids[i]
     mesh_id = mesh_ids[i]
-    
+
     # transform ray starts and dirs to mesh frame
     quat_wxyz = mesh_quat_w[mesh_id]
     quat_xyzw = wp.quat(quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0])
@@ -65,7 +66,7 @@ def transform_and_raycast_kernel(
         quat_xyzw,
         ray_dirs_w[cam_id, ray_id],
     )
-    
+
     result = wp.mesh_query_ray(
         meshes[mesh_id],
         ray_start_b,
@@ -86,25 +87,36 @@ class MultiMeshRaycaster:
         meshes: List of wp.Mesh objects.
     """
 
-    def __init__(self, meshes: list[wp.Mesh | trimesh.Trimesh], device: str, mesh_names: list[str] | None = None):
+    def __init__(
+        self,
+        meshes: list[wp.Mesh | trimesh.Trimesh],
+        device: str,
+        mesh_names: list[str] | None = None,
+    ):
         self.meshes = [
             mesh if isinstance(mesh, wp.Mesh) else trimesh2wp(mesh, device)
             for mesh in meshes
         ]
-        self.meshes_array = wp.array([mesh.id for mesh in self.meshes], device=device, dtype=wp.uint64)
+        self.meshes_array = wp.array(
+            [mesh.id for mesh in self.meshes], device=device, dtype=wp.uint64
+        )
         if mesh_names is not None and len(mesh_names) != len(meshes):
             raise ValueError("`mesh_names` length must match number of meshes.")
         self.mesh_names = list(mesh_names) if mesh_names is not None else None
         self.device = device
-    
+
     def add_mesh(self, mesh, mesh_name: str | None = None):
         if isinstance(mesh, trimesh.Trimesh):
             mesh = trimesh2wp(mesh, self.device)
         self.meshes.append(mesh)
-        self.meshes_array = wp.array([mesh.id for mesh in self.meshes], device=self.device, dtype=wp.uint64)
+        self.meshes_array = wp.array(
+            [mesh.id for mesh in self.meshes], device=self.device, dtype=wp.uint64
+        )
         if self.mesh_names is not None:
             if mesh_name is None:
-                raise ValueError("`mesh_name` must be provided when the raycaster tracks mesh names.")
+                raise ValueError(
+                    "`mesh_name` must be provided when the raycaster tracks mesh names."
+                )
             self.mesh_names.append(mesh_name)
 
     @property
@@ -128,7 +140,7 @@ class MultiMeshRaycaster:
         mesh_quat_w: torch.Tensor,  # [N, n_meshes, 4]
         ray_starts_w: torch.Tensor,  # [N, n_rays, 3]
         ray_dirs_w: torch.Tensor,  # [N, n_rays, 3]
-        enabled: torch.Tensor=None,  # [N]
+        enabled: torch.Tensor = None,  # [N]
         min_dist: float = 0.0,
         max_dist: float = 100.0,
     ):
@@ -156,10 +168,14 @@ class MultiMeshRaycaster:
         if enabled is None:
             enabled = torch.ones(N, dtype=torch.bool, device=ray_starts_w.device)
         else:
-            enabled = enabled.reshape(N,)
+            enabled = enabled.reshape(
+                N,
+            )
 
         # convert to mesh frame
-        ray_starts_b = quat_rotate_inverse(mesh_quat_w, ray_starts_w.unsqueeze(1) - mesh_pos_w)
+        ray_starts_b = quat_rotate_inverse(
+            mesh_quat_w, ray_starts_w.unsqueeze(1) - mesh_pos_w
+        )
         ray_dirs_b = quat_rotate_inverse(mesh_quat_w, ray_dirs_w.unsqueeze(1))
 
         ray_starts_wp = wp.from_torch(ray_starts_b, dtype=wp.vec3, return_ctype=True)
@@ -184,27 +200,31 @@ class MultiMeshRaycaster:
             device=self.device,
             record_tape=False,
         )
-        
-        hit_distances = hit_distances.min(dim=1).values # [N, n_rays]
-        hit_positions = ray_starts_w + hit_distances.unsqueeze(-1) * ray_dirs_w # [N, n_rays, 3]
+
+        hit_distances = hit_distances.min(dim=1).values  # [N, n_rays]
+        hit_positions = (
+            ray_starts_w + hit_distances.unsqueeze(-1) * ray_dirs_w
+        )  # [N, n_rays, 3]
         return hit_positions, hit_distances
-    
-    def get_mesh_ids(self, mesh_filters: list[list[str]]) -> list[list[int]]:
+
+    def get_mesh_ids(
+        self, mesh_filters: list[list[str]], device: str | torch.device
+    ) -> tuple[list[int], torch.Tensor, torch.Tensor]:
         """
-            mesh_filters: Optional list specifying which mesh names each camera should scan.
-                The outer list must have length N and each inner list contains regex patterns
-                that are matched against `mesh_names`. Only matching meshes are evaluated for
-                that camera; the rest are filled with `max_dist`. For example:
-                `[[".*"]] * N` scans every mesh for each camera, while
-                `[["ground", f"object_{i}"] for i in range(N)]` restricts camera `i`
-                to the shared ground mesh plus its corresponding `object_i`.
+        mesh_filters: Optional list specifying which mesh names each camera should scan.
+            The outer list must have length N and each inner list contains regex patterns
+            that are matched against `mesh_names`. Only matching meshes are evaluated for
+            that camera; the rest are filled with `max_dist`. For example:
+            `[[".*"]] * N` scans every mesh for each camera, while
+            `[["ground", f"object_{i}"] for i in range(N)]` restricts camera `i`
+            to the shared ground mesh plus its corresponding `object_i`.
         """
 
         if self.mesh_names is None:
             raise ValueError("Mesh filters require `mesh_names` to be set.")
-        # mask = torch.zeros((len(mesh_filters), self.n_meshes), dtype=torch.bool, device=device)
+        n_cam = len(mesh_filters)
         mesh_names = self.mesh_names
-        mesh_ids = [[] for _ in range(len(mesh_filters))]
+        mesh_ids: list[list[int]] = [[] for _ in range(n_cam)]
         for cam_idx, patterns in enumerate(mesh_filters):
             if not patterns:
                 continue
@@ -215,15 +235,29 @@ class MultiMeshRaycaster:
                 for mesh_idx, mesh_name in enumerate(mesh_names):
                     if regex.fullmatch(mesh_name):
                         mesh_ids[cam_idx].append(mesh_idx)
-        return mesh_ids
-    
+
+        n_mesh_per_cam = [len(ids) for ids in mesh_ids]
+        cam_ids = [[cam_idx] * len(ids) for cam_idx, ids in enumerate(mesh_ids)]
+
+        mesh_ids_flattened = sum(mesh_ids, [])
+        cam_ids_flattened = sum(cam_ids, [])
+        mesh_ids_flattened = torch.tensor(
+            mesh_ids_flattened, device=device, dtype=torch.int32
+        )
+        cam_ids_flattened = torch.tensor(
+            cam_ids_flattened, device=device, dtype=torch.int32
+        )
+        return n_mesh_per_cam, mesh_ids_flattened, cam_ids_flattened
+
     def raycast_fused(
         self,
         mesh_pos_w: torch.Tensor,  # [n_meshes, 3]
         mesh_quat_w: torch.Tensor,  # [n_meshes, 4]
         ray_starts_w: torch.Tensor,  # [n_cams, n_rays, 3]
         ray_dirs_w: torch.Tensor,  # [n_cams, n_rays, 3]
-        mesh_indices: list[list[int]] = None, # [n_cams][n_meshes_for_cam_i]
+        n_mesh_per_cam: list[int],
+        mesh_ids_flattened: torch.Tensor,  # [total_num_meshes]
+        cam_ids_flattened: torch.Tensor,  # [total_num_meshes]
         min_dist: float = 0.0,
         max_dist: float = 100.0,
     ):
@@ -242,14 +276,6 @@ class MultiMeshRaycaster:
             hit_distances: The distances to the hits. Shape [N, n_rays].
         """
         n_rays = ray_dirs_w.shape[1]
-        n_cam = ray_starts_w.shape[0]
-        if mesh_indices is None:
-            mesh_indices = [list(range(self.n_meshes)) for _ in range(n_cam)]
-        n_mesh_per_cam = [len(ids) for ids in mesh_indices]
-        mesh_ids_flattened = sum(mesh_indices, [])
-        cam_ids_flattened = [[cam_idx] * len(ids) for cam_idx, ids in enumerate(mesh_indices)]
-        mesh_ids_flattened = torch.tensor(mesh_ids_flattened, device=ray_starts_w.device, dtype=torch.int32)
-        cam_ids_flattened = torch.tensor(sum(cam_ids_flattened, []), device=ray_starts_w.device, dtype=torch.int32)
         total_length = mesh_ids_flattened.shape[0]
 
         hit_distances = torch.empty(total_length, n_rays, device=ray_starts_w.device)
@@ -275,9 +301,14 @@ class MultiMeshRaycaster:
         )
 
         hit_distances = torch.split(hit_distances, n_mesh_per_cam, dim=0)
-        hit_distances = [hit_distances_cam_i.min(dim=0).values for hit_distances_cam_i in hit_distances]
+        hit_distances = [
+            hit_distances_cam_i.min(dim=0).values
+            for hit_distances_cam_i in hit_distances
+        ]
         hit_distances = torch.stack(hit_distances, dim=0)  # [n_cam, n_rays]
-        hit_positions = ray_starts_w + hit_distances.unsqueeze(-1) * ray_dirs_w # [n_cam, n_rays, 3]
+        hit_positions = (
+            ray_starts_w + hit_distances.unsqueeze(-1) * ray_dirs_w
+        ) # [n_cam, n_rays, 3]
         return hit_positions, hit_distances
 
     @classmethod
@@ -302,7 +333,7 @@ class MultiMeshRaycaster:
             raise ValueError(
                 "`simplify_factor` must be a single float or a list of floats with the same length as `paths`"
             )
-        
+
         from .utils_usd import find_matching_prims, get_trimesh_from_prim
 
         meshes_wp = []
@@ -317,7 +348,7 @@ class MultiMeshRaycaster:
 
             for prim in prims:
                 mesh_combined = get_trimesh_from_prim(prim)
-                
+
                 n_verts_before += mesh_combined.vertices.shape[0]
                 n_faces_before += mesh_combined.faces.shape[0]
                 if factor > 0.0:
@@ -329,10 +360,11 @@ class MultiMeshRaycaster:
                 mesh_names.append(prim.GetPath().pathString)
 
         if n_faces_before != n_faces_after:
-            print(f"Simplified from ({n_verts_before}, {n_faces_before}) to ({n_verts_after}, {n_faces_after})")
+            print(
+                f"Simplified from ({n_verts_before}, {n_faces_before}) to ({n_verts_after}, {n_faces_after})"
+            )
 
         return cls(meshes_wp, device, mesh_names=mesh_names)
-    
 
     @classmethod
     def from_MjModel(
@@ -350,7 +382,7 @@ class MultiMeshRaycaster:
                 If a single float is provided, it will be used for all meshes.
         """
         from .utils_mjc import get_trimesh_from_body
-        
+
         mesh_names = []
         meshes_wp = []
 
@@ -374,6 +406,8 @@ class MultiMeshRaycaster:
                 meshes_wp.append(trimesh2wp(mesh, device))
 
         if n_faces_before != n_faces_after:
-            print(f"Simplified from ({n_verts_before}, {n_faces_before}) to ({n_verts_after}, {n_faces_after})")
+            print(
+                f"Simplified from ({n_verts_before}, {n_faces_before}) to ({n_verts_after}, {n_faces_after})"
+            )
 
         return cls(meshes_wp, device, mesh_names=mesh_names if mesh_names else None)
