@@ -36,11 +36,15 @@ from simple_raycaster.raycaster import MultiMeshRaycaster
 
 
 def main():
-    N, M = 64, 64
+    N, M = 4, 4
+    # N, M = 16, 16
+    # N, M = 64, 64
     spacing = 4.0
-    N_rays = 32 * 32
+    # N_rays = 32 * 32
+    N_rays = 4 * 4
 
     random_shapes = []
+    random_names = []
     translations = []
     origin_x = -0.5 * (N - 1) * spacing
     origin_y = -0.5 * (M - 1) * spacing
@@ -60,20 +64,21 @@ def main():
         
         translations.append(translation)
         random_shapes.append(shape)
+        random_names.append(f"shape_{i}_{j}")
     
     shared_shape = trimesh.creation.box(extents=[N*spacing, M*spacing, 1.0])
     shared_shape.apply_translation([0., 0., -0.5])
     random_shapes.append(shared_shape)
+    random_names.append("shared_shape")
+
 
     raycaster_independent = MultiMeshRaycaster(
         random_shapes,
+        mesh_names=random_names,
         device="cuda",
     )
-    mesh_indices = torch.arange(N * M, device="cuda").reshape(N * M, 1)
-    mesh_indices = torch.cat([
-        mesh_indices,
-        torch.full((N * M, 1), N * M, device="cuda"),
-    ], dim=1)
+    mesh_filters = [[f"shape_{i}_{j}", "shared_shape"] for j in range(M) for i in range(N)]
+    mesh_indices = raycaster_independent.get_mesh_ids(mesh_filters)
     
     for shape, translation in zip(random_shapes, translations):
         shape.apply_translation(translation)
@@ -84,27 +89,34 @@ def main():
         device="cuda",
     )
 
-    if N * M <= 64:
-        shapes_combined.show()
+    # if N * M <= 64:
+    #     shapes_combined.show()
 
-    translations = torch.tensor(translations, device="cuda").reshape(N * M, 1, 3)
-    translations = torch.cat([
+    # translations = torch.tensor(translations, device="cuda").reshape(N * M, 1, 3)
+    # translations = torch.cat([
+    #     translations,
+    #     torch.zeros_like(translations), # for the shared shape
+    # ], dim=1) # [N * M, 2, 3]
+    # quaternions = torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda").expand(N * M, 1, 4).clone()
+    # quaternions = torch.cat([
+    #     quaternions,
+    #     quaternions,
+    # ], dim=1) # [N * M, 2, 4]
+    translations = torch.tensor(translations, device="cuda").reshape(N * M, 3)
+    translations_meshes = torch.cat([
         translations,
-        torch.zeros_like(translations), # for the shared shape
-    ], dim=1) # [N * M, 2, 3]
-    quaternions = torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda").expand(N * M, 1, 4).clone()
-    quaternions = torch.cat([
-        quaternions,
-        quaternions,
-    ], dim=1) # [N * M, 2, 4]
+        torch.zeros_like(translations[:1]),
+    ], dim=0) # [N * M + 1, 3]
+    quaternions = torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda")
+    quaternions = quaternions.expand(N * M + 1, 4).clone() # [N * M + 1, 4]
     
-    ray_starts = translations[:, :1].expand(N * M, N_rays, 3).clone()
+    ray_starts = translations[:, None, :].expand(N * M, N_rays, 3).clone()
     ray_starts[:, :, :2] += torch.randn_like(ray_starts[:, :, :2]) * 0.05
     ray_starts[:, :, 2].uniform_(1.0, 2.0)
-    ray_dirs = torch.zeros(N * M, N_rays, 3, device="cuda")
 
+    ray_dirs = torch.zeros(N * M, N_rays, 3, device="cuda")
     ray_dirs[:, :, 2] = -1.0
-    ray_dirs[:, :, :2].uniform_(-0.2, 0.2)
+    ray_dirs[:, :, :2].uniform_(-1.0, 1.0)
     ray_dirs = ray_dirs / ray_dirs.norm(dim=-1, keepdim=True)
     
     # Warmup runs
@@ -128,24 +140,24 @@ def main():
             min_dist=0.05,
             max_dist=10.0,
         )
-        # Non-fused versions
-        _ = raycaster_independent.raycast(
-            mesh_pos_w=translations,
-            mesh_quat_w=quaternions,
-            ray_starts_w=ray_starts.clone(),
-            ray_dirs_w=ray_dirs.clone(),
-            mesh_indices=mesh_indices,
-            min_dist=0.05,
-            max_dist=10.0,
-        )
-        _ = raycaster_combined.raycast(
-            mesh_pos_w=torch.tensor([0., 0., 0.], device="cuda").expand(N * M, 1, 3),
-            mesh_quat_w=torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda").expand(N * M, 1, 4),
-            ray_starts_w=ray_starts.clone(),
-            ray_dirs_w=ray_dirs.clone(),
-            min_dist=0.05,
-            max_dist=10.0,
-        )
+        # # Non-fused versions
+        # _ = raycaster_independent.raycast(
+        #     mesh_pos_w=translations,
+        #     mesh_quat_w=quaternions,
+        #     ray_starts_w=ray_starts.clone(),
+        #     ray_dirs_w=ray_dirs.clone(),
+        #     mesh_indices=mesh_indices,
+        #     min_dist=0.05,
+        #     max_dist=10.0,
+        # )
+        # _ = raycaster_combined.raycast(
+        #     mesh_pos_w=torch.tensor([0., 0., 0.], device="cuda").expand(N * M, 1, 3),
+        #     mesh_quat_w=torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda").expand(N * M, 1, 4),
+        #     ray_starts_w=ray_starts.clone(),
+        #     ray_dirs_w=ray_dirs.clone(),
+        #     min_dist=0.05,
+        #     max_dist=10.0,
+        # )
     torch.cuda.synchronize()
     
     # Helper function to format memory size
@@ -205,14 +217,14 @@ def main():
         description="Option 1 (independent meshes) - FUSED"
     )
     
-    time_1_nonfused, mem_before_1_nonfused, mem_after_1_nonfused, mem_peak_1_nonfused, mem_used_1_nonfused, pos_1_nonfused, dist_1_nonfused = benchmark_raycast(
-        raycaster_independent, "raycast",
-        translations,
-        quaternions,
-        ray_starts, ray_dirs,
-        mesh_indices=mesh_indices,
-        description="Option 1 (independent meshes) - NON-FUSED"
-    )
+    # time_1_nonfused, mem_before_1_nonfused, mem_after_1_nonfused, mem_peak_1_nonfused, mem_used_1_nonfused, pos_1_nonfused, dist_1_nonfused = benchmark_raycast(
+    #     raycaster_independent, "raycast",
+    #     translations,
+    #     quaternions,
+    #     ray_starts, ray_dirs,
+    #     mesh_indices=mesh_indices,
+    #     description="Option 1 (independent meshes) - NON-FUSED"
+    # )
     
     time_2_fused, mem_before_2_fused, mem_after_2_fused, mem_peak_2_fused, mem_used_2_fused, pos_2_fused, dist_2_fused = benchmark_raycast(
         raycaster_combined, "raycast_fused",
@@ -222,13 +234,13 @@ def main():
         description="Option 2 (combined mesh) - FUSED"
     )
     
-    time_2_nonfused, mem_before_2_nonfused, mem_after_2_nonfused, mem_peak_2_nonfused, mem_used_2_nonfused, pos_2_nonfused, dist_2_nonfused = benchmark_raycast(
-        raycaster_combined, "raycast",
-        torch.tensor([0., 0., 0.], device="cuda").expand(N * M, 1, 3),
-        torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda").expand(N * M, 1, 4),
-        ray_starts, ray_dirs,
-        description="Option 2 (combined mesh) - NON-FUSED"
-    )
+    # time_2_nonfused, mem_before_2_nonfused, mem_after_2_nonfused, mem_peak_2_nonfused, mem_used_2_nonfused, pos_2_nonfused, dist_2_nonfused = benchmark_raycast(
+    #     raycaster_combined, "raycast",
+    #     torch.tensor([0., 0., 0.], device="cuda").expand(N * M, 1, 3),
+    #     torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda").expand(N * M, 1, 4),
+    #     ray_starts, ray_dirs,
+    #     description="Option 2 (combined mesh) - NON-FUSED"
+    # )
     
     # Print results
     print("\n" + "="*70)
@@ -237,41 +249,41 @@ def main():
     
     print("\nTIMING (ms per iteration):")
     print(f"  Option 1 (independent meshes) - FUSED:     {time_1_fused:.4f} ms")
-    print(f"  Option 1 (independent meshes) - NON-FUSED: {time_1_nonfused:.4f} ms")
+    # print(f"  Option 1 (independent meshes) - NON-FUSED: {time_1_nonfused:.4f} ms")
     print(f"  Option 2 (combined mesh) - FUSED:          {time_2_fused:.4f} ms")
-    print(f"  Option 2 (combined mesh) - NON-FUSED:       {time_2_nonfused:.4f} ms")
+    # print(f"  Option 2 (combined mesh) - NON-FUSED:       {time_2_nonfused:.4f} ms")
     
-    print("\nFUSED vs NON-FUSED Comparison:")
-    print(f"  Option 1: Fused is {time_1_nonfused / time_1_fused:.2f}x faster" if time_1_fused < time_1_nonfused else f"  Option 1: Non-fused is {time_1_fused / time_1_nonfused:.2f}x faster")
-    print(f"  Option 2: Fused is {time_2_nonfused / time_2_fused:.2f}x faster" if time_2_fused < time_2_nonfused else f"  Option 2: Non-fused is {time_2_fused / time_2_nonfused:.2f}x faster")
+    # print("\nFUSED vs NON-FUSED Comparison:")
+    # print(f"  Option 1: Fused is {time_1_nonfused / time_1_fused:.2f}x faster" if time_1_fused < time_1_nonfused else f"  Option 1: Non-fused is {time_1_fused / time_1_nonfused:.2f}x faster")
+    # print(f"  Option 2: Fused is {time_2_nonfused / time_2_fused:.2f}x faster" if time_2_fused < time_2_nonfused else f"  Option 2: Non-fused is {time_2_fused / time_2_nonfused:.2f}x faster")
     
     print("\nOPTION 1 vs OPTION 2 Comparison:")
     print(f"  Fused:   Option 1 is {time_2_fused / time_1_fused:.2f}x faster" if time_1_fused < time_2_fused else f"  Fused:   Option 2 is {time_1_fused / time_2_fused:.2f}x faster")
-    print(f"  Non-fused: Option 1 is {time_2_nonfused / time_1_nonfused:.2f}x faster" if time_1_nonfused < time_2_nonfused else f"  Non-fused: Option 2 is {time_1_nonfused / time_2_nonfused:.2f}x faster")
+    # print(f"  Non-fused: Option 1 is {time_2_nonfused / time_1_nonfused:.2f}x faster" if time_1_nonfused < time_2_nonfused else f"  Non-fused: Option 2 is {time_1_nonfused / time_2_nonfused:.2f}x faster")
     
     print("\nMEMORY USAGE:")
     print(f"  Option 1 (independent meshes) - FUSED:")
     print(f"    Peak memory: {format_memory(mem_peak_1_fused)}")
     print(f"    Memory used: {format_memory(mem_used_1_fused)}")
-    print(f"  Option 1 (independent meshes) - NON-FUSED:")
-    print(f"    Peak memory: {format_memory(mem_peak_1_nonfused)}")
-    print(f"    Memory used: {format_memory(mem_used_1_nonfused)}")
+    # print(f"  Option 1 (independent meshes) - NON-FUSED:")
+    # print(f"    Peak memory: {format_memory(mem_peak_1_nonfused)}")
+    # print(f"    Memory used: {format_memory(mem_used_1_nonfused)}")
     print(f"  Option 2 (combined mesh) - FUSED:")
     print(f"    Peak memory: {format_memory(mem_peak_2_fused)}")
     print(f"    Memory used: {format_memory(mem_used_2_fused)}")
-    print(f"  Option 2 (combined mesh) - NON-FUSED:")
-    print(f"    Peak memory: {format_memory(mem_peak_2_nonfused)}")
-    print(f"    Memory used: {format_memory(mem_used_2_nonfused)}")
+    # print(f"  Option 2 (combined mesh) - NON-FUSED:")
+    # print(f"    Peak memory: {format_memory(mem_peak_2_nonfused)}")
+    # print(f"    Memory used: {format_memory(mem_used_2_nonfused)}")
     
-    print("\nMEMORY COMPARISON:")
-    if mem_peak_1_fused < mem_peak_1_nonfused:
-        print(f"  Option 1: Fused uses {mem_peak_1_nonfused / mem_peak_1_fused:.2f}x less peak memory")
-    else:
-        print(f"  Option 1: Non-fused uses {mem_peak_1_fused / mem_peak_1_nonfused:.2f}x less peak memory")
-    if mem_peak_2_fused < mem_peak_2_nonfused:
-        print(f"  Option 2: Fused uses {mem_peak_2_nonfused / mem_peak_2_fused:.2f}x less peak memory")
-    else:
-        print(f"  Option 2: Non-fused uses {mem_peak_2_fused / mem_peak_2_nonfused:.2f}x less peak memory")
+    # print("\nMEMORY COMPARISON:")
+    # if mem_peak_1_fused < mem_peak_1_nonfused:
+    #     print(f"  Option 1: Fused uses {mem_peak_1_nonfused / mem_peak_1_fused:.2f}x less peak memory")
+    # else:
+    #     print(f"  Option 1: Non-fused uses {mem_peak_1_fused / mem_peak_1_nonfused:.2f}x less peak memory")
+    # if mem_peak_2_fused < mem_peak_2_nonfused:
+    #     print(f"  Option 2: Fused uses {mem_peak_2_nonfused / mem_peak_2_fused:.2f}x less peak memory")
+    # else:
+    #     print(f"  Option 2: Non-fused uses {mem_peak_2_fused / mem_peak_2_nonfused:.2f}x less peak memory")
     
     # Compare Option 1 vs Option 2 (using fused versions)
     if mem_peak_1_fused < mem_peak_2_fused:
@@ -285,15 +297,16 @@ def main():
     print("\nVerifying results match...")
     results = [
         ("Option 1 Fused", pos_1_fused, dist_1_fused),
-        ("Option 1 Non-fused", pos_1_nonfused, dist_1_nonfused),
+        # ("Option 1 Non-fused", pos_1_nonfused, dist_1_nonfused),
         ("Option 2 Fused", pos_2_fused, dist_2_fused),
-        ("Option 2 Non-fused", pos_2_nonfused, dist_2_nonfused),
+        # ("Option 2 Non-fused", pos_2_nonfused, dist_2_nonfused),
     ]
     
     # Compare all against Option 1 Fused as reference
     ref_name, ref_pos, ref_dist = results[0]
     
-    if N * M <= 64:
+    # if N * M <= 64:
+    if True:
         scene = trimesh.Scene()
         # Make shapes_combined slightly transparent
         shapes_combined.visual.face_colors = [128, 128, 128, 200]  # Gray color with slight transparency
