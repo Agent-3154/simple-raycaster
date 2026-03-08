@@ -34,7 +34,7 @@ def get_trimesh_from_prim(prim: Usd.Prim, predicate: Callable[[Usd.Prim], bool] 
 
 def get_mesh_prims_subtree(prim: Usd.Prim, predicate: Callable[[Usd.Prim], bool] = lambda _: True):
     """
-    Recursively get all mesh primitives from a USD prim.
+    Recursively get all mesh primitives (Mesh and Cube) from a USD prim.
     """
     if prim.IsInstance():
         prim = prim.GetPrototype()
@@ -42,20 +42,49 @@ def get_mesh_prims_subtree(prim: Usd.Prim, predicate: Callable[[Usd.Prim], bool]
     all_prims = [prim]
     while len(all_prims) > 0:
         child_prim = all_prims.pop(0)
-        if child_prim.GetTypeName() == "Mesh" and predicate(child_prim):
+        type_name = child_prim.GetTypeName()
+        if type_name in ("Mesh", "Cube") and predicate(child_prim):
             mesh_prims.append(child_prim)
         all_prims += child_prim.GetChildren()
     return mesh_prims
 
 
+def _get_cube_extents(cube_prim: Usd.Prim) -> np.ndarray:
+    """
+    Get edge lengths (extents) for a UsdGeom.Cube prim.
+    Uses size attribute, or extent attribute as fallback; default is (2, 2, 2).
+    """
+    cube = UsdGeom.Cube(cube_prim)
+    time = Usd.TimeCode.Default()
+    size_attr = cube.GetSizeAttr()
+    if size_attr:
+        size_val = size_attr.Get(time)
+        if size_val is not None:
+            size = np.array(size_val, dtype=np.float64)
+            if size.shape == ():
+                size = np.array([size, size, size])
+            return size
+    extent_attr = cube.GetExtentAttr()
+    if extent_attr:
+        extent = np.array(extent_attr.Get(time), dtype=np.float64)
+        if extent is not None and len(extent) >= 6:
+            return np.array([
+                extent[3] - extent[0],
+                extent[4] - extent[1],
+                extent[5] - extent[2],
+            ])
+    return np.array([2.0, 2.0, 2.0])
+
+
 def usd2trimesh(prim: Usd.Prim):
     """
-    Convert a USD prim to a trimesh.Trimesh object.
+    Convert a USD prim (Mesh or Cube) to a trimesh.Trimesh object.
 
     Args:
-        prim: The USD prim to convert.
-        apply_transform: Whether to apply the local transform to the mesh.
+        prim: The USD prim to convert (UsdGeom.Mesh or UsdGeom.Cube).
     """
+    if prim.GetTypeName() == "Cube":
+        return trimesh.creation.box(extents=_get_cube_extents(prim))
     mesh = UsdGeom.Mesh(prim)
     vertices = np.asarray(mesh.GetPointsAttr().Get())
     faces = np.asarray(mesh.GetFaceVertexIndicesAttr().Get())
@@ -65,11 +94,16 @@ def usd2trimesh(prim: Usd.Prim):
 
 def usd2wp(prim: Usd.Prim, device):
     """
-    Convert a USD prim to a wp.Mesh object.
+    Convert a USD prim (Mesh or Cube) to a wp.Mesh object.
     """
-    mesh = UsdGeom.Mesh(prim)
-    vertices = np.asarray(mesh.GetPointsAttr().Get())
-    faces = np.asarray(mesh.GetFaceVertexIndicesAttr().Get())
+    if prim.GetTypeName() == "Cube":
+        box = trimesh.creation.box(extents=_get_cube_extents(prim))
+        vertices = np.asarray(box.vertices)
+        faces = np.asarray(box.faces)
+    else:
+        mesh = UsdGeom.Mesh(prim)
+        vertices = np.asarray(mesh.GetPointsAttr().Get())
+        faces = np.asarray(mesh.GetFaceVertexIndicesAttr().Get())
     return wp.Mesh(
         points=wp.array(vertices.astype(np.float32), dtype=wp.vec3, device=device),
         indices=wp.array(faces.astype(np.int32).flatten(), dtype=wp.int32, device=device),

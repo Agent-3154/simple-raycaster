@@ -25,11 +25,13 @@ class MultiMeshRaycaster:
         meshes: List of wp.Mesh objects.
     """
 
-    def __init__(self, meshes_wp: List[MeshType], device: str):
+    def __init__(self, meshes_wp: List[MeshType], device: str | torch.device):
         self.meshes_wp = [
             mesh_wp if isinstance(mesh_wp, wp.Mesh) else trimesh2wp(mesh_wp, device)
             for mesh_wp in meshes_wp
         ]
+        if not isinstance(device, str):
+            device = wp.get_device(str(device))
         self.device = device
         self.mesh_names = None
         self.initialized = False
@@ -347,6 +349,9 @@ class MultiMeshRaycaster:
         
         n_rays = ray_dirs_w.shape[1]
         N = mesh_pos_w.shape[0]
+        assert mesh_pos_w.shape[1] == mesh_quat_w.shape[1] == self.n_meshes, (
+            f"`mesh_pos_w` and `mesh_quat_w` must have the same number of meshes as the raycaster: {self.n_meshes}"
+        )
 
         if enabled is None:
             enabled = torch.ones(N, dtype=torch.bool, device=ray_starts_w.device)
